@@ -16,7 +16,7 @@ func main() {
 		select {
 		case muxed := <-outc:
 			fmt.Println(muxed)
-		case retired := <-retiredc
+		case retired := <-retiredc:
 			log.Printf("Retiring daemon %d (%s) because it exited with error %v\n", retired.Index, retired.Command, retired.Err)
 		}
 	}
