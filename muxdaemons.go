@@ -8,28 +8,33 @@ import (
 	"log"
 )
 
+const DEBUG bool = false
+
+type MuxdCtl int
+const (
+	AllRetired MuxdCtl = iota
+)
+
 // Represents a retired daemon (a deamon that errored out)
 type Retired struct {
 	// the position of the command as given in the first argument to Run()
 	Index int
-	// the command string as given in the first argument to Run()
-	Command string
 	// the error that caused this daemon to retire (failed to start, broken pipe, EOF, etc)
 	Err error
 }
 
-type daemon struct {
-	out		chan string
-	command	string
-	err		error
-}
-
-func teeLine(r *bufio.Reader, errc chan error) (string) {
-	str, err := r.ReadString('\n')
-	if err != nil {
-		errc <- err
+func collectOutput(i int, reader *bufio.Reader, out chan string, outSync chan int, retirements chan *Retired) {
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			out <- strings.TrimRight(line, "\n")
+			outSync <- i
+		}
+		if err != nil {
+			retirements <- &Retired{i, err}
+			return
+		}
 	}
-	return str
 }
 
 // Run daemons and multiplex their output line by line.
@@ -40,70 +45,64 @@ func teeLine(r *bufio.Reader, errc chan error) (string) {
 // out channel.
 //
 // If a command fails to launch, or if its output stream is closed or broken,
-// a Retired object will be sent on the retirements channel.
-func Run(commands []string, out chan string, retirements chan *Retired) {
-	// initialize daemons
-	daemons := make([]*daemon, len(commands))
-	for i, c := range commands {
-		daemons[i] = &daemon{make(chan string, 1), c, nil}
-	}
+// a Retired object will be sent on the retirements channel. When all commands are retired,
+// AllRetired is sent on the ctl channel.
+func Run(commands []string, out chan string, retirements chan *Retired, ctl chan MuxdCtl) {
+	outSync := make(chan int)
+	outs := make([]chan string, len(commands))
+	retirementsProxy := make(chan *Retired, len(commands) + 1)
 
 	// launch daemons
-	errc := make(chan int)
-	sync := make(chan int)
-	for i, d := range daemons {
-		go func(i int, d *daemon) {
-			lines := make(chan string, 1)
-			myErrc := make(chan error, 1)
-			line := ""
-
-			log.Printf("%d (%s) execing\n", i, d.command)
-			cmd := exec.Command(d.command)
-			cmdOut, err := cmd.StdoutPipe()
-			if err != nil {
-				d.err = err
-				errc <- i
-				return
-			}
-			bufCmdOut := bufio.NewReader(cmdOut)
-			log.Printf("%d (%s) starting\n", i, d.command)
-			err = cmd.Start()
-			if err != nil {
-				d.err = err
-				errc <- i
-				return
-			}
-			log.Printf("%d (%s) started\n", i, d.command)
-			for {
-				select {
-				case lines <- teeLine(bufCmdOut, myErrc):
-					log.Printf("%d (%s) teeLine out\n", i, d.command)
-				case line = <-lines:
-					log.Printf("%d (%s) line consumed\n", i, d.command)
-					d.out <- line
-					sync <- i
-				case err := <-myErrc:
-					log.Printf("%d (%s) error consumed\n", i, d.command)
-					d.err = err
-					errc <- i
-					return
-				}
-			}
-		}(i, d)
+	for i, c := range commands {
+		cmd := exec.Command(c)
+		if DEBUG {
+			log.Printf("%d (%s) execing\n", i, c)
+		}
+		cmdOut, err := cmd.StdoutPipe()
+		if err != nil {
+			retirementsProxy <- &Retired{i, err}
+			continue
+		}
+		bufCmdOut := bufio.NewReader(cmdOut)
+		if DEBUG {
+			log.Printf("%d (%s) starting\n", i, c)
+		}
+		err = cmd.Start()
+		if err != nil {
+			retirementsProxy <- &Retired{i, err}
+			continue
+		}
+		if DEBUG {
+			log.Printf("%d (%s) started\n", i, c)
+		}
+		outs[i] = make(chan string, 1)
+		go collectOutput(i, bufCmdOut, outs[i], outSync, retirementsProxy)
 	}
 
-	// mux output as it arrives
-	lines := make([]string, len(daemons))
+	// mux output
+	muxed := make([]string, len(commands))
+	retired := 0
 	for {
 		select {
-		case i := <-errc:
-			log.Printf("sending retirement %d\n", i)
-			retirements <- &Retired{i, daemons[i].command, daemons[i].err}
-		case i := <-sync:
-			log.Printf("got sync %d\n", i)
-			lines[i] = strings.TrimRight(<-daemons[i].out, "\n")
-			log.Printf("sending line '%v'\n", lines)
-			out <- strings.Join(lines, " ")
+		case r := <-retirementsProxy:
+			retirements <- r
+			retired += 1
+			if DEBUG {
+				log.Printf("retired => %d; len(commands) => %d\n", retired, len(commands))
+			}
+			if retired == len(commands) {
+				ctl <- AllRetired
+				return
+			}
+		case i := <-outSync:
+			if DEBUG {
+				log.Printf("got sync %d\n", i)
+			}
+			muxed[i] = <-outs[i]
+			if DEBUG {
+				log.Printf("sending line '%v'\n", muxed)
+			}
+			out <- strings.Join(muxed, " ")
 		}
 	}
 }

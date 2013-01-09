@@ -4,6 +4,7 @@ import (
 	"testing"
 	"os/exec"
 	"strings"
+	"fmt"
 )
 
 // check that we can load & run the test scripts
@@ -29,7 +30,7 @@ func checkLine(line [6]int, ref string) bool {
 		if n == 0 {
 			strLine[i] = ""
 		} else {
-			strLine[i] = string(n)
+			strLine[i] = fmt.Sprintf("%d", n)
 		}
 	}
 	return strings.Join(strLine, " ") == ref
@@ -42,33 +43,26 @@ func TestRun(t *testing.T) {
 		{out: {1: true, 2: true}},
 		{out: {1: true, 3: true}},
 		{out: {1: true, 2: true}},
-		{out: {1: true}, ded: {1: true}},
+		{out: {1: true}},
+		{ded: {1: true}},
 		{out: {2: true, 3: true}, ded: {2: true, 3: true}},
 	}
-	/*
-	events := []map[eventType] map[int] bool {
-		{ded: {4: true}},
-		{ded: {3: true}},
-		{out: {0: true}},
-		{out: {0: true, 1: true}},
-		{out: {0: true, 2: true}},
-		{out: {0: true, 1: true}},
-		{out: {0: true}, ded: {0: true}},
-		{out: {1: true, 2: true}, ded: {1: true, 2: true}},
-	}
-	*/
 	outc := make(chan string)
 	retiredc := make(chan *Retired)
+	ctl := make(chan MuxdCtl)
 	commands := []string{"testdata/1x0", "testdata/5x1", "testdata/3x2", "testdata/2x3", "testdata/0x", "testdata/nope"}
-//	commands := []string{"testdata/5x1", "testdata/3x2", "testdata/2x3", "testdata/0x", "testdata/nope"}
-	go Run(commands, outc, retiredc)
+	go Run(commands, outc, retiredc, ctl)
 	var line [6]int
 	for _, simultaneousEvents := range events {
-		t.Logf("checking %v\n", simultaneousEvents)
+		if DEBUG {
+			t.Logf("checking %v\n", simultaneousEvents)
+		}
 		for len(simultaneousEvents) > 0 {
 			select {
 			case retiree := <-retiredc:
-				t.Logf("got retiree %v\n", retiree)
+				if DEBUG {
+					t.Logf("got retiree %v\n", retiree)
+				}
 				if simultaneousEvents[ded][retiree.Index] {
 					delete(simultaneousEvents[ded], retiree.Index)
 					if len(simultaneousEvents[ded]) == 0 {
@@ -78,7 +72,9 @@ func TestRun(t *testing.T) {
 					t.Fatalf("wrongful death: got %d, expected one of %v", retiree.Index, simultaneousEvents[ded])
 				}
 			case output := <-outc:
-				t.Logf("got output %s\n", output)
+				if DEBUG {
+					t.Logf("got output '%s'\n", output)
+				}
 				ok := false
 				for c, _ := range simultaneousEvents[out] {
 					tentativeLine := line
@@ -97,6 +93,19 @@ func TestRun(t *testing.T) {
 					t.Fatalf("output '%s' cannot be reached from line '%v' with any of these events: %v", output, line, simultaneousEvents[out])
 				}
 			}
+		}
+	}
+	for {
+		select {
+		case ev := <-ctl:
+			if ev != AllRetired {
+				t.Fatalf("got a ctl signal other than AllRetired\n")
+			}
+			return
+		case output := <-outc:
+			t.Fatalf("leftover output: '%s'\n", output)
+		case retiree := <-retiredc:
+			t.Fatalf("leftover retiree: '%v'\n", retiree)
 		}
 	}
 }

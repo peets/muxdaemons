@@ -11,13 +11,20 @@ import (
 func main() {
 	outc := make(chan string)
 	retiredc := make(chan *muxdaemons.Retired)
-	go muxdaemons.Run(os.Args[1:], outc, retiredc)
+	ctl := make(chan muxdaemons.MuxdCtl)
+	commands := os.Args[1:]
+	go muxdaemons.Run(commands, outc, retiredc, ctl)
 	for {
 		select {
 		case muxed := <-outc:
 			fmt.Println(muxed)
 		case retired := <-retiredc:
-			log.Printf("Retiring daemon %d (%s) because it exited with error %v\n", retired.Index, retired.Command, retired.Err)
+			log.Printf("Retiring daemon %d (%s) because it exited with error %v\n", retired.Index, commands[retired.Index], retired.Err)
+		case ctlEvent := <-ctl:
+			switch ctlEvent {
+			case muxdaemons.AllRetired:
+				return
+			}
 		}
 	}
 }
